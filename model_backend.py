@@ -1,6 +1,7 @@
 import sys
 import os
 from pathlib import Path
+import shap
 
 # Ensure root directory is in sys.path
 ROOT_DIR = Path(__file__).resolve().parent
@@ -161,32 +162,84 @@ def get_site_dataframe(site_name):
             return df_site.reset_index(drop=True)
     return df
 
-def explain_sample_shap(ph, do, bod, turb=3.2, tds=300.0):
-    contributions = {
-        "pH Level": 0.45 * (6.5 - ph) if ph < 6.5 else (0.40 * (ph - 8.5) if ph > 8.5 else -0.25),
-        "Dissolved Oxygen": 0.50 * (4.0 - do) if do < 4.0 else -0.30,
-        "BOD (Organic Load)": 0.42 * (bod - (2.0 + 0.6*do)) if bod > (2.0 + 0.6*do) else -0.20,
-        "Turbidity": 0.18 * (turb - 5.0) if turb > 5.0 else -0.15,
-        "Total Dissolved Solids": 0.12 * ((tds - 800)/100) if tds > 800 else -0.10
-    }
-    return {
-        "feature_contributions": contributions,
-        "violation_law": "DO-BOD Coupling & Thermodynamic Bounds",
-        "regulation_reference": "WHO Guidelines for Drinking-water Quality / TNPCB Water Act 1974"
-    }
+
+def explain_sample_shap(scaled_features_list):
+    """
+    Compute TRUE model-driven feature attributions using SHAP 
+    (GradientExplainer) against the PyTorch DomainConstrainedMLP model.
+    """
+    model, scaler, encoder, df, feat_cols = load_pytorch_artifacts()
+    
+    # Prepare background dataset from training data for SHAP baseline (e.g., first 50 rows)
+    background_df = df[feat_cols].head(50)
+    background_tensor = torch.tensor(background_df.values, dtype=torch.float32)
+    
+    # Current sample tensor
+    X_input = np.array([scaled_features_list], dtype=np.float32)
+    X_tensor = torch.tensor(X_input, dtype=torch.float32)
+    
+    try:
+        # Initialize SHAP GradientExplainer
+        explainer = shap.GradientExplainer(model, background_tensor)
+        shap_values = explainer.shap_values(X_tensor)
+        
+        # Handle multi-class output (shap_values is a list of arrays per class, or a single array)
+        if isinstance(shap_values, list):
+            # Take shap values corresponding to the predicted class or mean impact
+            pred_idx = torch.argmax(model(X_tensor)).item()
+            class_shap = shap_values[pred_idx][0]
+        else:
+            class_shap = shap_values[0]
+            
+        # Map back to feature names with physical/feature labels
+        readable_names = {
+            'orp_mV': 'ORP Potential',
+            'ec_uScm': 'Electrical Conductivity',
+            'tds_mgL': 'Total Dissolved Solids (TDS)',
+            'turbidity_NTU': 'Turbidity',
+            'temp_C': 'Temperature',
+            'pH': 'pH Level',
+            'do_mgL': 'Dissolved Oxygen (DO)',
+            'hour': 'Time (Hour)',
+            'day': 'Day',
+            'month': 'Month',
+            'dayofweek': 'Day of Week'
+        }
+        
+        contributions = {
+            readable_names.get(col, col): float(val) 
+            for col, val in zip(feat_cols, class_shap)
+        }
+        
+        return {
+            "feature_contributions": contributions,
+            "violation_law": "Deep Neural Network Gradient Attribution (SHAP)",
+            "regulation_reference": "WHO Guidelines for Drinking-water Quality / TNPCB Water Act 1974"
+        }
+        
+    except Exception as e:
+        # Fallback if SHAP background tensor encounters device/shape mismatch
+        return {
+            "feature_contributions": {col: 0.0 for col in feat_cols},
+            "violation_law": f"SHAP Computation Fallback ({str(e)})",
+            "regulation_reference": "WHO Guidelines for Drinking-water Quality"
+        }
 
 def calculate_recourse_actions(ph, do, bod, turb=3.2, tds=300.0):
     before_after = []
     checklist = []
+    severity_score = 0
     
     if ph < 6.5:
         target_ph = 7.0
         delta = target_ph - ph
+        severity_score += abs(delta) * 3
         before_after.append({"parameter": "pH Level", "current": f"{ph:.1f}", "recommended": f"{target_ph:.1f}", "delta": f"+{delta:.2f}", "method": "Add neutralizing agent (Lime slurry dosing)", "unit": "pH"})
         checklist.append({"task": f"Add pH neutralizing agent (Lime slurry) — Dosage: {max(10, int(delta * 8.5))} kg", "assignee": "Operator_1", "status": "Pending"})
     elif ph > 8.5:
         target_ph = 8.0
         delta = ph - target_ph
+        severity_score += abs(delta) * 3
         before_after.append({"parameter": "pH Level", "current": f"{ph:.1f}", "recommended": f"{target_ph:.1f}", "delta": f"-{delta:.2f}", "method": "Dispense mineral acid neutralizing buffer", "unit": "pH"})
         checklist.append({"task": "Dispense mineral acid buffer at Dosing Line 2", "assignee": "Operator_2", "status": "Pending"})
         
@@ -194,20 +247,31 @@ def calculate_recourse_actions(ph, do, bod, turb=3.2, tds=300.0):
     if do < 4.5:
         target_do = 6.5
         delta_do = target_do - do
+        severity_score += delta_do * 4
         before_after.append({"parameter": "Dissolved Oxygen (DO)", "current": f"{do:.1f} mg/L", "recommended": f"{target_do:.1f} mg/L", "delta": f"+{delta_do:.1f} mg/L", "method": "Increase mechanical aeration blower speed", "unit": "mg/L"})
         checklist.append({"task": f"Increase aeration rate at Tank A by +{min(50, int(delta_do * 12))}%", "assignee": "Operator_1", "status": "Pending"})
         
     if bod > allowed_bod:
         target_bod = max(2.0, allowed_bod - 0.5)
         delta_bod = bod - target_bod
+        severity_score += delta_bod * 2.5
         before_after.append({"parameter": "Biological Oxygen Demand (BOD)", "current": f"{bod:.1f} mg/L", "recommended": f"{target_bod:.1f} mg/L", "delta": f"-{delta_bod:.1f} mg/L", "method": "(Coupled auto-reduction via Bacillus subtilis bio-dosing & aeration)", "unit": "mg/L"})
         checklist.append({"task": "Inject Bacillus subtilis bio-augmentation strain (Unit 2)", "assignee": "Plant_Manager", "status": "Pending"})
 
     checklist.append({"task": "Re-test sample after 30 minutes to verify compliance restoration", "assignee": "Operator_1", "status": "Pending"})
 
+    # Dynamic success rate calculation: Starts at 98%, drops slightly for higher severity/more corrective actions, capped between 75% and 99%
+    calculated_success = int(round(98.0 - min(20.0, severity_score * 1.5)))
+    predicted_success_rate = max(75, min(99, calculated_success))
+
     urgency = "🔴 Immediate Action" if (ph < 4.0 or do < 2.0 or bod > 8.0) else ("🟡 Schedule Maintenance" if len(before_after) > 0 else "🟢 Monitor Only")
 
-    return {"urgency": urgency, "predicted_success_rate": 94, "before_after": before_after, "checklist": checklist}
+    return {
+        "urgency": urgency, 
+        "predicted_success_rate": predicted_success_rate, 
+        "before_after": before_after, 
+        "checklist": checklist
+    }
 
 # ==========================================
 # 5. Global Session State Management
