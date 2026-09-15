@@ -165,65 +165,53 @@ def get_site_dataframe(site_name):
 
 def explain_sample_shap(scaled_features_list):
     """
-    Compute TRUE model-driven feature attributions using SHAP 
-    (GradientExplainer) against the PyTorch DomainConstrainedMLP model.
+    Compute model-driven SHAP feature attributions for the predicted class.
+    Input features are already scaled model inputs, matching inference.
     """
     model, scaler, encoder, df, feat_cols = load_pytorch_artifacts()
-    
-    # Prepare background dataset from training data for SHAP baseline (e.g., first 50 rows)
-    background_df = df[feat_cols].head(50)
-    background_tensor = torch.tensor(background_df.values, dtype=torch.float32)
-    
-    # Current sample tensor
-    X_input = np.array([scaled_features_list], dtype=np.float32)
-    X_tensor = torch.tensor(X_input, dtype=torch.float32)
-    
-    try:
-        # Initialize SHAP GradientExplainer
-        explainer = shap.GradientExplainer(model, background_tensor)
-        shap_values = explainer.shap_values(X_tensor)
-        
-        # Handle multi-class output (shap_values is a list of arrays per class, or a single array)
-        if isinstance(shap_values, list):
-            # Take shap values corresponding to the predicted class or mean impact
-            pred_idx = torch.argmax(model(X_tensor)).item()
-            class_shap = shap_values[pred_idx][0]
-        else:
-            class_shap = shap_values[0]
-            
-        # Map back to feature names with physical/feature labels
-        readable_names = {
-            'orp_mV': 'ORP Potential',
-            'ec_uScm': 'Electrical Conductivity',
-            'tds_mgL': 'Total Dissolved Solids (TDS)',
-            'turbidity_NTU': 'Turbidity',
-            'temp_C': 'Temperature',
-            'pH': 'pH Level',
-            'do_mgL': 'Dissolved Oxygen (DO)',
-            'hour': 'Time (Hour)',
-            'day': 'Day',
-            'month': 'Month',
-            'dayofweek': 'Day of Week'
-        }
-        
-        contributions = {
-            readable_names.get(col, col): float(val) 
-            for col, val in zip(feat_cols, class_shap)
-        }
-        
-        return {
-            "feature_contributions": contributions,
-            "violation_law": "Deep Neural Network Gradient Attribution (SHAP)",
-            "regulation_reference": "WHO Guidelines for Drinking-water Quality / TNPCB Water Act 1974"
-        }
-        
-    except Exception as e:
-        # Fallback if SHAP background tensor encounters device/shape mismatch
-        return {
-            "feature_contributions": {col: 0.0 for col in feat_cols},
-            "violation_law": f"SHAP Computation Fallback ({str(e)})",
-            "regulation_reference": "WHO Guidelines for Drinking-water Quality"
-        }
+
+    background_tensor = torch.tensor(
+        df[feat_cols].sample(n=min(50, len(df)), random_state=42).values,
+        dtype=torch.float32,
+    )
+    sample_tensor = torch.tensor(
+        np.asarray([scaled_features_list], dtype=np.float32), dtype=torch.float32
+    )
+
+    with torch.no_grad():
+        predicted_class = int(torch.argmax(model(sample_tensor), dim=1).item())
+
+    shap_values = shap.GradientExplainer(model, background_tensor).shap_values(sample_tensor)
+    values = np.asarray(shap_values)
+
+    # SHAP returns either a list per output class or a 3-D array.  Select the
+    # attribution vector for the class the model actually predicted.
+    if isinstance(shap_values, list):
+        class_values = np.asarray(shap_values[predicted_class])[0]
+    elif values.ndim == 3 and values.shape[1] == len(feat_cols):
+        class_values = values[0, :, predicted_class]
+    elif values.ndim == 3:
+        class_values = values[0, predicted_class, :]
+    else:
+        class_values = values[0]
+
+    readable_names = {
+        'orp_mV': 'ORP Potential', 'ec_uScm': 'Electrical Conductivity',
+        'tds_mgL': 'Total Dissolved Solids (TDS)', 'turbidity_NTU': 'Turbidity',
+        'temp_C': 'Temperature', 'pH': 'pH Level',
+        'do_mgL': 'Dissolved Oxygen (DO)', 'hour': 'Time (Hour)',
+        'day': 'Day', 'month': 'Month', 'dayofweek': 'Day of Week',
+    }
+    contributions = {
+        readable_names.get(column, column): float(value)
+        for column, value in zip(feat_cols, class_values)
+    }
+    return {
+        "feature_contributions": contributions,
+        "predicted_class": predicted_class,
+        "violation_law": "Model-derived SHAP attribution",
+        "regulation_reference": "WHO Guidelines for Drinking-water Quality / TNPCB Water Act 1974",
+    }
 
 def calculate_recourse_actions(ph, do, bod, turb=3.2, tds=300.0):
     before_after = []
@@ -337,6 +325,7 @@ def set_active_sample_from_row(row, row_idx=0, site_name="Tank A (Main Reservoir
             "Timestamp": timestamp_str,
             "Site Name": site_name,
             "Sample ID": sample_id,
+            "_raw_features": raw_feats,
             "pH": f"{phys['ph']:.1f}",
             "DO (mg/L)": f"{phys['do']:.1f}",
             "BOD (mg/L)": f"{phys['bod']:.1f}",
@@ -348,6 +337,7 @@ def set_active_sample_from_row(row, row_idx=0, site_name="Tank A (Main Reservoir
     else:
         existing_log = next(log for log in st.session_state["audit_logs"] if log["Sample ID"] == sample_id)
         existing_log["Prediction"] = pred_res["prediction"]
+        existing_log["_raw_features"] = raw_feats
         existing_log["Risk Tier"] = pred_res["status_tier"]
         existing_log["Confidence"] = f"{pred_res['confidence']*100:.1f}%"
         existing_log["Violation Flag"] = "YES" if violation_flag else "NO"
