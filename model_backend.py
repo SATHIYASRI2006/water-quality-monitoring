@@ -150,6 +150,7 @@ def predict_with_pytorch(scaled_features_list):
         "status_tier": status_tier,
         "badge_color": badge_color,
         "probabilities": probs[0].tolist(),
+        "safe_confidence": probs[0][0].item(),
         "domain_violation": domain_violation,
         "explanation": f"PyTorch Neural Network inference completed with {confidence*100:.1f}% confidence. Assigned to {status_tier} based on model logits."
     }
@@ -163,7 +164,7 @@ def get_site_dataframe(site_name):
     return df
 
 
-def explain_sample_shap(scaled_features_list):
+def _explain_sample_shap(scaled_features_list):
     """
     Compute model-driven SHAP feature attributions for the predicted class.
     Input features are already scaled model inputs, matching inference.
@@ -181,7 +182,22 @@ def explain_sample_shap(scaled_features_list):
     with torch.no_grad():
         predicted_class = int(torch.argmax(model(sample_tensor), dim=1).item())
 
-    shap_values = shap.GradientExplainer(model, background_tensor).shap_values(sample_tensor)
+    try:
+        shap_values = shap.GradientExplainer(model, background_tensor).shap_values(sample_tensor)
+    except Exception:
+        # Some SHAP/PyTorch version combinations do not support
+        # GradientExplainer for this architecture. DeepExplainer remains a
+        # model-based SHAP method and is used as a compatible alternative.
+        try:
+            shap_values = shap.DeepExplainer(model, background_tensor).shap_values(sample_tensor)
+        except Exception:
+            return {
+                "feature_contributions": {},
+                "predicted_class": predicted_class,
+                "shap_available": False,
+                "violation_law": "Model-derived SHAP attribution unavailable",
+                "regulation_reference": "WHO Guidelines for Drinking-water Quality / TNPCB Water Act 1974",
+            }
     values = np.asarray(shap_values)
 
     # SHAP returns either a list per output class or a 3-D array.  Select the
@@ -209,11 +225,24 @@ def explain_sample_shap(scaled_features_list):
     return {
         "feature_contributions": contributions,
         "predicted_class": predicted_class,
+        "shap_available": True,
         "violation_law": "Model-derived SHAP attribution",
         "regulation_reference": "WHO Guidelines for Drinking-water Quality / TNPCB Water Act 1974",
     }
 
-def calculate_recourse_actions(ph, do, bod, turb=3.2, tds=300.0):
+def explain_sample_shap(scaled_features_list):
+    """Return real SHAP results without allowing attribution failures to stop the UI."""
+    try:
+        return _explain_sample_shap(scaled_features_list)
+    except Exception:
+        return {
+            "feature_contributions": {},
+            "shap_available": False,
+            "violation_law": "Model-derived SHAP attribution unavailable",
+            "regulation_reference": "WHO Guidelines for Drinking-water Quality / TNPCB Water Act 1974",
+        }
+
+def calculate_recourse_actions(ph, do, bod, turb=3.2, tds=300.0, scaled_features_list=None):
     before_after = []
     checklist = []
     severity_score = 0
@@ -248,9 +277,27 @@ def calculate_recourse_actions(ph, do, bod, turb=3.2, tds=300.0):
 
     checklist.append({"task": "Re-test sample after 30 minutes to verify compliance restoration", "assignee": "Operator_1", "status": "Pending"})
 
-    # Dynamic success rate calculation: Starts at 98%, drops slightly for higher severity/more corrective actions, capped between 75% and 99%
-    calculated_success = int(round(98.0 - min(20.0, severity_score * 1.5)))
-    predicted_success_rate = max(75, min(99, calculated_success))
+    # Evaluate the proposed counterfactual with the same PyTorch model used
+    # for the live prediction.  The displayed success rate is therefore the
+    # model's Safe-class probability, not a decorative constant.
+    proposed_prediction = None
+    proposed_features = scaled_features_list
+    if scaled_features_list is not None:
+        _, scaler, _, _, feat_cols = load_pytorch_artifacts()
+        physical = inverse_transform_row(scaled_features_list, scaler, feat_cols)
+        for action in before_after:
+            target = float(action["recommended"].split()[0])
+            if action["parameter"] == "pH Level":
+                physical["pH"] = target
+            elif action["parameter"] == "Dissolved Oxygen (DO)":
+                physical["do_mgL"] = target
+            elif action["parameter"] == "Biological Oxygen Demand (BOD)":
+                physical["tds_mgL"] = (target - 2.5) / 0.01
+        proposed_features = scaler.transform(pd.DataFrame([physical], columns=feat_cols))[0].tolist()
+        proposed_prediction = predict_with_pytorch(proposed_features)
+        predicted_success_rate = int(round(proposed_prediction["safe_confidence"] * 100))
+    else:
+        predicted_success_rate = 0
 
     urgency = "🔴 Immediate Action" if (ph < 4.0 or do < 2.0 or bod > 8.0) else ("🟡 Schedule Maintenance" if len(before_after) > 0 else "🟢 Monitor Only")
 
@@ -258,7 +305,9 @@ def calculate_recourse_actions(ph, do, bod, turb=3.2, tds=300.0):
         "urgency": urgency, 
         "predicted_success_rate": predicted_success_rate, 
         "before_after": before_after, 
-        "checklist": checklist
+        "checklist": checklist,
+        "proposed_prediction": proposed_prediction,
+        "proposed_features": proposed_features,
     }
 
 # ==========================================
@@ -282,6 +331,12 @@ def init_global_state():
 
     if "audit_logs" not in st.session_state:
         st.session_state["audit_logs"] = []
+
+    if "actuator_log" not in st.session_state:
+        st.session_state["actuator_log"] = []
+
+    if "checklist_state" not in st.session_state:
+        st.session_state["checklist_state"] = {}
 
     if "active_sample" not in st.session_state or "active_prediction" not in st.session_state:
         df_site = get_site_dataframe(st.session_state["selected_site"])
