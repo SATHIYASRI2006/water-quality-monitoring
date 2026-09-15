@@ -61,21 +61,53 @@ def load_pytorch_artifacts():
     return model, scaler, encoder, df, feat_cols
 
 # ==========================================
-# 3. Pure Neural Network Prediction (No IF/ELSE Overrides)
+# 3. Inverse Transform & Unscaling Helpers
 # ==========================================
-def predict_with_pytorch(raw_features_list):
+def inverse_transform_row(scaled_features_list, scaler, feat_cols):
     """
-    Pure PyTorch Neural Network Inference directly on dataset features.
-    Returns predicted class, confidence score, and class probabilities.
-    NO hardcoded if-else classification rules.
+    Convert one row of scaled model-input features back to physical units
+    using the actual fitted StandardScaler (scaler.pkl).
     """
-    model, scaler, encoder, _, _ = load_pytorch_artifacts()
-    
-    # Scale input vector using the fitted StandardScaler
-    X_input = pd.DataFrame([raw_features_list], columns=['orp_mV', 'ec_uScm', 'tds_mgL', 'turbidity_NTU', 'temp_C', 'pH', 'do_mgL', 'hour', 'day', 'month', 'dayofweek'])
-    X_scaled = scaler.transform(X_input)
+    X_scaled = pd.DataFrame([scaled_features_list], columns=feat_cols)
+    X_physical = scaler.inverse_transform(X_scaled)
+    return dict(zip(feat_cols, X_physical[0]))
 
-    # PyTorch Forward Pass
+def unscale_row(row):
+    """
+    Recover physical units (pH, DO, Turbidity, TDS) for display using
+    scaler.inverse_transform() instead of hand-coded linear reconstruction.
+    """
+    _, scaler, _, _, feat_cols = load_pytorch_artifacts()
+    scaled_feats = [float(row[col]) for col in feat_cols]
+    physical = inverse_transform_row(scaled_feats, scaler, feat_cols)
+
+    ph = float(np.clip(physical["pH"], 2.0, 12.0))
+    do = float(np.clip(physical["do_mgL"], 0.0, 15.0))
+    turb = float(np.clip(physical["turbidity_NTU"], 0.1, 30.0))
+    tds = float(np.clip(physical["tds_mgL"], 50.0, 1500.0))
+    bod = float(np.clip(tds * 0.01 + 2.5, 0.5, 20.0))
+
+    return {
+        "ph": ph,
+        "do": do,
+        "bod": bod,
+        "bod_is_proxy": True,
+        "turbidity": turb,
+        "tds": tds
+    }
+
+# ==========================================
+# 4. Pure Neural Network Prediction (Fixed Double-Scaling)
+# ==========================================
+def predict_with_pytorch(scaled_features_list):
+    """
+    Pure PyTorch Neural Network Inference.
+    Consumes pre-scaled features directly from dataset without double-transforming.
+    """
+    model, scaler, encoder, _, feat_cols = load_pytorch_artifacts()
+    
+    X_scaled = np.array([scaled_features_list], dtype=np.float32)
+
     with torch.no_grad():
         logits = model(torch.tensor(X_scaled, dtype=torch.float32))
         probs = torch.softmax(logits, dim=1)
@@ -100,10 +132,13 @@ def predict_with_pytorch(raw_features_list):
     status_tier = class_names.get(pred_cls_idx, f"Class {pred_cls_idx}")
     badge_color = class_colors.get(pred_cls_idx, "#0EA5E9")
 
-    # Domain physics check for violation flag
-    ph_val = float(raw_features_list[5] * 0.8 + 7.2)
-    do_val = float(raw_features_list[6] * 1.5 + 6.5)
-    bod_val = float(raw_features_list[2] * 1.2 + 2.5)
+    # Domain physics check using real inverse-transformed physical values
+    physical = inverse_transform_row(scaled_features_list, scaler, feat_cols)
+    ph_val = float(physical["pH"])
+    do_val = float(physical["do_mgL"])
+    tds_val = float(physical["tds_mgL"])
+    bod_val = float(np.clip(tds_val * 0.01 + 2.5, 0.5, 20.0))
+
     allowed_bod = 2.0 + (0.6 * do_val)
     domain_violation = (ph_val < 4.0 or ph_val > 10.5 or bod_val > allowed_bod)
 
@@ -125,26 +160,6 @@ def get_site_dataframe(site_name):
         if len(df_site) > 0:
             return df_site.reset_index(drop=True)
     return df
-
-def unscale_row(row):
-    ph_raw = float(row.get('pH', 0.0))
-    do_raw = float(row.get('do_mgL', 0.0))
-    tds_raw = float(row.get('tds_mgL', 0.0))
-    turb_raw = float(row.get('turbidity_NTU', 0.0))
-    
-    ph = np.clip(ph_raw * 0.8 + 7.2, 2.0, 12.0)
-    do = np.clip(do_raw * 1.5 + 6.5, 0.0, 15.0)
-    bod = np.clip(tds_raw * 1.2 + 2.5, 0.5, 20.0)
-    turb = np.clip(turb_raw * 2.5 + 3.2, 0.1, 30.0)
-    tds = np.clip(tds_raw * 150.0 + 350.0, 50.0, 1500.0)
-    
-    return {
-        "ph": float(ph),
-        "do": float(do),
-        "bod": float(bod),
-        "turbidity": float(turb),
-        "tds": float(tds)
-    }
 
 def explain_sample_shap(ph, do, bod, turb=3.2, tds=300.0):
     contributions = {
@@ -195,7 +210,7 @@ def calculate_recourse_actions(ph, do, bod, turb=3.2, tds=300.0):
     return {"urgency": urgency, "predicted_success_rate": 94, "before_after": before_after, "checklist": checklist}
 
 # ==========================================
-# 4. Global Session State Management
+# 5. Global Session State Management
 # ==========================================
 def init_global_state():
     if "selected_site" not in st.session_state:
@@ -267,8 +282,6 @@ def set_active_sample_from_row(row, row_idx=0, site_name="Tank A (Main Reservoir
             "Violation Flag": "YES" if violation_flag else "NO"
         })
     else:
-        # Keep a previously viewed sample's audit row consistent with the
-        # model's current risk classification.
         existing_log = next(log for log in st.session_state["audit_logs"] if log["Sample ID"] == sample_id)
         existing_log["Prediction"] = pred_res["prediction"]
         existing_log["Risk Tier"] = pred_res["status_tier"]
