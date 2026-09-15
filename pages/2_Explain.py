@@ -57,14 +57,20 @@ if matched_log:
     s_do = float(matched_log["DO (mg/L)"].replace(" mg/L", ""))
     s_bod = float(matched_log["BOD (mg/L)"].replace(" mg/L", ""))
     s_site = matched_log["Site Name"]
-    s_raw_feats = st.session_state["active_sample"].get("raw_features", [0.0]*11)
+    s_raw_feats = matched_log.get("_raw_features")
+    if s_raw_feats is None:
+        st.warning("This older audit entry has no stored model input; showing the active sample instead.")
+        s_raw_feats = st.session_state["active_sample"]["raw_features"]
 else:
     active_s = st.session_state["active_sample"]
     s_ph, s_do, s_bod, s_site = active_s["ph"], active_s["do"], active_s["bod"], active_s["site_name"]
     s_raw_feats = active_s.get("raw_features", [0.0]*11)
 
+# Ensure raw features is a list of clean floats to prevent format type errors
+s_raw_feats = [float(val) for val in s_raw_feats]
+
 pred_res = predict_with_pytorch(s_raw_feats)
-explain_res = explain_sample_shap(s_ph, s_do, s_bod)
+explain_res = explain_sample_shap(s_raw_feats)
 
 st.markdown("---")
 
@@ -81,41 +87,39 @@ else:
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-# 3. Feature Contribution Chart (SHAP-style)
+# 3. Feature Contribution Chart (model-derived SHAP)
 st.subheader("📊 SHAP Feature Attribution Analysis")
 st.caption("Horizontal bar chart showing how much each parameter pushed the AI prediction towards **Unsafe (Red Bars)** or **Safe (Green Bars)**.")
 
-shap_data = []
-# The lightweight explainer returns signed, heuristic contributions.  For a
-# model-confirmed high-risk result, a negative heuristic value must not make
-# the visual contradict the classifier by labelling the bar as "Pushes Safe".
-is_unsafe_prediction = pred_res["status_tier"] in {"High Risk", "Critical Threat"}
-for feat, val in explain_res["feature_contributions"].items():
-    attribution_impact = (
-        "Pushes Unsafe (Hazard)"
-        if is_unsafe_prediction or val > 0
-        else "Pushes Safe (Optimal)"
+if not explain_res.get("shap_available", True):
+    st.error("Model-based SHAP attribution is unavailable for this model configuration.")
+else:
+    shap_data = []
+    for feat, val in explain_res["feature_contributions"].items():
+        attribution_impact = (
+            "Pushes Unsafe (Hazard)"
+            if val > 0
+            else "Pushes Safe (Optimal)"
+        )
+        shap_data.append({
+            "Feature": feat,
+            "Contribution Score": val,
+            "Attribution Impact": attribution_impact,
+            "Color": "#EF4444" if attribution_impact == "Pushes Unsafe (Hazard)" else "#22C55E"
+        })
+
+    df_shap = pd.DataFrame(shap_data).sort_values(by="Contribution Score", ascending=True)
+    fig_shap = px.bar(
+        df_shap,
+        x="Contribution Score",
+        y="Feature",
+        orientation="h",
+        color="Attribution Impact",
+        color_discrete_map={"Pushes Unsafe (Hazard)": "#EF4444", "Pushes Safe (Optimal)": "#22C55E"},
+        template="plotly_white"
     )
-    shap_data.append({
-        "Feature": feat,
-        "Contribution Score": val,
-        "Attribution Impact": attribution_impact,
-        "Color": "#EF4444" if attribution_impact == "Pushes Unsafe (Hazard)" else "#22C55E"
-    })
-
-df_shap = pd.DataFrame(shap_data).sort_values(by="Contribution Score", ascending=True)
-
-fig_shap = px.bar(
-    df_shap,
-    x="Contribution Score",
-    y="Feature",
-    orientation="h",
-    color="Attribution Impact",
-    color_discrete_map={"Pushes Unsafe (Hazard)": "#EF4444", "Pushes Safe (Optimal)": "#22C55E"},
-    template="plotly_white"
-)
-fig_shap.update_layout(height=280, margin=dict(l=20, r=20, t=20, b=20), xaxis_title="Attribution Impact Score (SHAP)")
-st.plotly_chart(fig_shap, width='stretch')
+    fig_shap.update_layout(height=280, margin=dict(l=20, r=20, t=20, b=20), xaxis_title="Attribution Impact Score (SHAP)")
+    st.plotly_chart(fig_shap, use_container_width=True)
 
 st.markdown("---")
 
@@ -165,20 +169,41 @@ with comp_col1:
         buffer = io.BytesIO()
         doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
         styles = getSampleStyleSheet()
+        audit_rows = [["Sample ID", "Site", "Risk tier", "Violation"]]
+        audit_rows.extend([[log["Sample ID"], log["Site Name"], log["Risk Tier"], log["Violation Flag"]] for log in logs])
+        action_rows = [["Time", "Sample", "Action", "Projected status"]]
+        action_rows.extend([
+            [entry["Timestamp"], entry["Sample ID"], entry["Action"], entry["Projected Post-Recourse Status"]]
+            for entry in st.session_state.get("actuator_log", [])
+        ])
+        audit_table = Table(audit_rows, repeatRows=1)
+        action_table = Table(action_rows, repeatRows=1)
+        for table in (audit_table, action_table):
+            table.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1E3A5F")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
+                ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ]))
         story = [
-            Paragraph("WEEKLY WATER QUALITY COMPLIANCE REPORT", styles['Heading1']),
+            Paragraph("WATER QUALITY COMPLIANCE AUDIT REPORT", styles['Heading1']),
             Paragraph(f"<b>Issued By:</b> AquaGuard Enterprise AI Governance Platform", styles['Normal']),
             Paragraph(f"<b>Period:</b> Active Session Audit | <b>Date:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", styles['Normal']),
             Spacer(1, 15),
-            Paragraph(f"<b>Compliance Summary:</b> {total_audited} samples evaluated. {violations_count} violations registered and mitigated. Overall compliance score maintained at {compliance_pct:.1f}%.", styles['Normal']),
-            Spacer(1, 15)
+            Paragraph(f"<b>Compliance Summary:</b> {total_audited} samples evaluated; {violations_count} violation flags recorded. Current compliance rate: {compliance_pct:.1f}%.", styles['Normal']),
+            Spacer(1, 12),
+            Paragraph("Per-sample audit trail", styles['Heading2']),
+            audit_table,
+            Spacer(1, 12),
+            Paragraph("Operator action and counterfactual trail", styles['Heading2']),
+            action_table,
         ]
         doc.build(story)
         buffer.seek(0)
         return buffer.getvalue()
 
     pdf_bytes = generate_pdf()
-    st.download_button("📄 Download Certified PDF Compliance Report", data=pdf_bytes, file_name=f"AquaGuard_Compliance_Report_{datetime.now().strftime('%Y%m%d')}.pdf", mime="application/pdf", type="primary")
+    st.download_button("Download Compliance Audit PDF", data=pdf_bytes, file_name=f"AquaGuard_Compliance_Audit_{datetime.now().strftime('%Y%m%d')}.pdf", mime="application/pdf", type="primary")
 
 with comp_col2:
     st.markdown("#### Risk Distribution (Active Session)")
@@ -193,7 +218,7 @@ with comp_col2:
     })
     
     fig_pie = px.pie(df_pie, values="Count", names="Status", color="Status",
-                     color_discrete_map={"Safe / Low Risk": "#22C55E", "Medium Risk": "#F59E0B", "High Risk / Critical": "#EF4444"},
-                     hole=0.4, template="plotly_white")
+                       color_discrete_map={"Safe / Low Risk": "#22C55E", "Medium Risk": "#F59E0B", "High Risk / Critical": "#EF4444"},
+                       hole=0.4, template="plotly_white")
     fig_pie.update_layout(height=220, margin=dict(l=10, r=10, t=10, b=10))
-    st.plotly_chart(fig_pie, width='stretch')
+    st.plotly_chart(fig_pie, use_container_width=True)

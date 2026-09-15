@@ -36,7 +36,8 @@ rec_res = calculate_recourse_actions(
     active_sample["ph"],
     active_sample["do"],
     active_sample["bod"],
-    active_sample["turbidity"]
+    active_sample["turbidity"],
+    scaled_features_list=active_sample["raw_features"]
 )
 
 # 1. Site / Sample Context Card & Urgency Badge
@@ -77,22 +78,35 @@ st.markdown("---")
 st.subheader("📋 Operator Action Checklist & Assignment Panel")
 st.caption("Assignable task list for plant technicians and supervisors to execute and track remediation progress.")
 
-if "checklist_state" not in st.session_state:
-    st.session_state["checklist_state"] = {}
-
 for idx, item in enumerate(rec_res["checklist"], start=1):
     chk_key = f"{active_sample['sample_id']}_chk_{idx}"
     ass_key = f"{active_sample['sample_id']}_ass_{idx}"
     stat_key = f"{active_sample['sample_id']}_stat_{idx}"
+    state_key = f"{active_sample['sample_id']}_step_{idx}"
+    saved_state = st.session_state["checklist_state"].setdefault(
+        state_key, {"checked": False, "assignee": item["assignee"], "status": item["status"]}
+    )
+    if chk_key not in st.session_state:
+        st.session_state[chk_key] = saved_state["checked"]
+    if ass_key not in st.session_state:
+        st.session_state[ass_key] = saved_state["assignee"]
+    if stat_key not in st.session_state:
+        st.session_state[stat_key] = saved_state["status"]
+
+    def save_checklist_step(key=state_key, checkbox=chk_key, assignee_key=ass_key, status_key=stat_key):
+        st.session_state["checklist_state"][key] = {
+            "checked": st.session_state[checkbox],
+            "assignee": st.session_state[assignee_key],
+            "status": st.session_state[status_key],
+        }
 
     c_chk, c_assign, c_status = st.columns([3, 1, 1])
     with c_chk:
-        checked = st.checkbox(f"**Step {idx}:** {item['task']}", key=chk_key)
+        checked = st.checkbox(f"**Step {idx}:** {item['task']}", key=chk_key, on_change=save_checklist_step)
     with c_assign:
-        assignee = st.selectbox("Assignee:", ["Operator_1", "Operator_2", "Plant_Manager"], index=0, key=ass_key)
+        assignee = st.selectbox("Assignee:", ["Operator_1", "Operator_2", "Plant_Manager"], key=ass_key, on_change=save_checklist_step)
     with c_status:
-        default_idx = 2 if checked else 1
-        status_val = st.selectbox("Status:", ["Pending", "In Progress", "Resolved"], index=default_idx, key=stat_key)
+        status_val = st.selectbox("Status:", ["Pending", "In Progress", "Resolved"], key=stat_key, on_change=save_checklist_step)
 
 st.markdown("---")
 
@@ -138,13 +152,11 @@ with prev_col1:
         st.plotly_chart(fig_a, width='stretch')
 
 with prev_col2:
-    st.subheader("🔔 Notification Dispatch Log")
-    notif_data = pd.DataFrame([
-        {"Notified Party": "Operator_1", "Channel": "SMS / Push", "Time Sent": "10:32 AM", "Acknowledged": "✓ YES"},
-        {"Notified Party": "Plant_Manager", "Channel": "Email", "Time Sent": "10:33 AM", "Acknowledged": "✓ YES"},
-        {"Notified Party": "Compliance_Officer", "Channel": "Email", "Time Sent": "10:34 AM", "Acknowledged": "Pending"}
-    ])
-    st.dataframe(notif_data, width='stretch', hide_index=True)
+    st.subheader("🔔 Operator Action Log")
+    if st.session_state["actuator_log"]:
+        st.dataframe(pd.DataFrame(st.session_state["actuator_log"]), width='stretch', hide_index=True)
+    else:
+        st.info("No operator actions have been dispatched for this sample.")
 
 st.markdown("---")
 
@@ -153,6 +165,16 @@ st.subheader("⚡ Live Actuator Telecontrol Panel")
 st.caption("Override or manually engage biological dosing, mechanical aerators, and mineral buffer feeders.")
 
 acts = st.session_state["actuators"]
+
+def log_actuator_action(action, detail):
+    projected_status = rec_res["proposed_prediction"]["status_tier"] if rec_res["proposed_prediction"] else "Not evaluated"
+    st.session_state["actuator_log"].insert(0, {
+        "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "Sample ID": active_sample["sample_id"],
+        "Action": action,
+        "Details": detail,
+        "Projected Post-Recourse Status": projected_status,
+    })
 
 ac_t1, ac_t2 = st.columns([3, 1])
 with ac_t2:
@@ -167,6 +189,7 @@ with ac1:
     new_speed = st.slider("Speed Control (%)", 0, 100, acts["aeration_speed"], key="rec_aer_slider")
     if st.button("Set Aeration Speed"):
         acts["aeration_speed"] = new_speed
+        log_actuator_action("Aeration blower set", f"Speed set to {new_speed}%")
         st.toast(f"Aerator Blower Bank A speed set to {new_speed}%!")
 
 with ac2:
@@ -175,6 +198,7 @@ with ac2:
     new_bio = st.selectbox("Dosing Rate", ["0.5 L/hr", "1.2 L/hr (Standard)", "2.5 L/hr (High BOD)", "5.0 L/hr (Shock Dosing)"], index=1, key="rec_bio_select")
     if st.button("Dispense Bio-Culture"):
         acts["bio_culture_rate"] = new_bio
+        log_actuator_action("Bio-culture dispensed", f"Dosing rate set to {new_bio}")
         st.toast(f"Bio-culture dosing rate updated to {new_bio}!")
 
 with ac3:
@@ -183,6 +207,7 @@ with ac3:
     new_kg = st.number_input("Dispense Amount (kg)", 0, 500, acts["mineral_buffer_kg"], step=10, key="rec_min_input")
     if st.button("Inject Mineral Buffer"):
         acts["mineral_buffer_kg"] = new_kg
+        log_actuator_action("Mineral buffer injected", f"Dispense amount set to {new_kg} kg")
         st.toast(f"Mineral buffer feed of {new_kg} kg queued!")
 
 with ac4:
@@ -190,4 +215,5 @@ with ac4:
     st.caption("Sluice Valve Lockout")
     if st.button("⚠️ EMERGENCY VALVE LOCK", type="primary", key="rec_emerg_btn"):
         acts["emergency_lock"] = True
+        log_actuator_action("Emergency valve lock", "Main intake sluice gate locked")
         st.error("🚨 Emergency isolation command dispatched! Main intake sluice gate locked.")

@@ -97,7 +97,7 @@ row_idx = st.slider(
 selected_row = df_site.iloc[row_idx]
 phys = unscale_row(selected_row)
 
-st.write("Loaded Raw Feature Vector from Dataset Row:", selected_row[feat_cols].to_dict())
+st.write("Loaded Scaled Model Input Vector from Dataset Row:", selected_row[feat_cols].to_dict())
 
 # Automatically update active sample and run PyTorch inference whenever row_idx or site changes
 set_active_sample_from_row(
@@ -183,9 +183,10 @@ st.subheader("📋 Real Dataset Prediction Audit Log")
 st.caption("Growing log of all PyTorch neural network evaluations performed in this session.")
 
 df_audit = pd.DataFrame(st.session_state["audit_logs"])
-st.dataframe(df_audit, width='stretch', hide_index=True)
+display_audit = df_audit.drop(columns=["_raw_features"], errors="ignore")
+st.dataframe(display_audit, width='stretch', hide_index=True)
 
 exp_col1, exp_col2 = st.columns([1, 1])
 with exp_col1:
-    csv_bytes = df_audit.to_csv(index=False).encode('utf-8')
+    csv_bytes = display_audit.to_csv(index=False).encode('utf-8')
     st.download_button("📊 Export Session Audit Log (CSV)", data=csv_bytes, file_name="Session_Prediction_Audit_Log.csv", mime="text/csv")
