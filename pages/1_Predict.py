@@ -57,27 +57,19 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# 1. Initialize Global State & Persistent Header
+# 1. Initialize Global State, Sidebar & Persistent Header
 init_global_state()
+from model_backend import render_global_sidebar
+render_global_sidebar()
 render_persistent_header()
 
 _, _, _, df_full, feat_cols = load_pytorch_artifacts()
-available_sites = df_full['site_name'].unique().tolist() if 'site_name' in df_full.columns else ["Tank A (Main Reservoir)", "Industrial Basin B", "Effluent Plant C", "Coastal Bio-Swale"]
 
 # Page Header
 st.title("🔬 Live Sample Analysis & PyTorch Model Inference")
-st.caption("Direct stream ingestion from `processed_fishpond_train.csv` (1,722 Rows). Moving the slider instantly runs PyTorch forward pass inference and updates all pages!")
+st.caption(f"Direct stream ingestion from `processed_fishpond_train.csv` (2,500 Real Data Points). Moving the slider instantly runs PyTorch forward pass inference and updates all pages!")
 
-site_col, mode_col = st.columns([2, 2])
-
-with site_col:
-    selected_site_predict = st.selectbox(
-        "Select Active Facility Site:",
-        available_sites,
-        index=available_sites.index(st.session_state["selected_site"]) if st.session_state["selected_site"] in available_sites else 0,
-        key="pred_site_select"
-    )
-
+selected_site_predict = st.session_state["selected_site"]
 df_site = get_site_dataframe(selected_site_predict)
 
 st.markdown("---")

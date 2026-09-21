@@ -22,14 +22,16 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from model_backend import (
     init_global_state,
     render_persistent_header,
+    render_global_sidebar,
     explain_sample_shap,
     predict_with_pytorch
 )
 
 st.set_page_config(page_title="Explainability & Compliance | AquaGuard", layout="wide")
 
-# 1. Initialize Global State & Persistent Header
+# 1. Initialize Global State, Sidebar & Persistent Header
 init_global_state()
+render_global_sidebar()
 render_persistent_header()
 
 # Header

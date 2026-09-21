@@ -14,13 +14,15 @@ from datetime import datetime
 from model_backend import (
     init_global_state,
     render_persistent_header,
+    render_global_sidebar,
     calculate_recourse_actions
 )
 
 st.set_page_config(page_title="Recourse & Operator Action | AquaGuard", layout="wide")
 
-# 1. Initialize Global State & Persistent Header
+# 1. Initialize Global State, Sidebar & Persistent Header
 init_global_state()
+render_global_sidebar()
 render_persistent_header()
 
 # Header

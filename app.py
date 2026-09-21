@@ -129,10 +129,16 @@ with m1:
     st.caption(f"AI Confidence: {pred['confidence']*100:.1f}%")
 
 with m2:
-    st.metric("Model F1-Score", "0.91", "↑ +0.02 vs baseline")
+    st.metric("Model F1-Score (Test)", "89.35%", "Cross-validated")
 
 with m3:
-    st.metric("Domain Violation Rate (DVR)", "0.2%", "⬇ -0.4% optimal")
+    logs = st.session_state.get("audit_logs", [])
+    if len(logs) > 0:
+        dvr_count = sum(1 for l in logs if "⚠️" in l.get("Violation Flag", ""))
+        dvr = (dvr_count / len(logs)) * 100
+    else:
+        dvr = 0.0
+    st.metric("Domain Violation Rate (DVR)", f"{dvr:.1f}%", "From active session logs")
 
 with m4:
     st.metric("Site Records Monitored", f"{len(df_filtered)} Samples", f"Total Tank Data Points")
@@ -269,7 +275,7 @@ for s_name in available_sites:
     sub_site = get_site_dataframe(s_name)
     if len(sub_site) > 0:
         p_row = unscale_row(sub_site.iloc[0])
-        eval_p = predict_with_pytorch([float(sub_site.iloc[0][col]) for col in ['orp_mV', 'ec_uScm', 'tds_mgL', 'turbidity_NTU', 'temp_C', 'pH', 'do_mgL', 'hour', 'day', 'month', 'dayofweek']])
+        eval_p = predict_with_pytorch([float(sub_site.iloc[0][col]) for col in ['orp_mV', 'ec_uScm', 'tds_mgL', 'turbidity_NTU', 'temp_C', 'pH', 'do_mgL', 'bod_mgL', 'hour', 'day', 'month', 'dayofweek']])
         
         if eval_p["status_tier"] == "Safe / Low Risk":
             b_html = "🟢 SAFE"

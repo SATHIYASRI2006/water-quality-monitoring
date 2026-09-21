@@ -50,7 +50,7 @@ def load_pytorch_artifacts():
     scaler = joblib.load(scaler_path)
     encoder = joblib.load(encoder_path)
 
-    feat_cols = ['orp_mV', 'ec_uScm', 'tds_mgL', 'turbidity_NTU', 'temp_C', 'pH', 'do_mgL', 'hour', 'day', 'month', 'dayofweek']
+    feat_cols = ['orp_mV', 'ec_uScm', 'tds_mgL', 'turbidity_NTU', 'temp_C', 'pH', 'do_mgL', 'bod_mgL', 'hour', 'day', 'month', 'dayofweek']
     input_dim = len(feat_cols)
     num_classes = len(encoder.classes_)
 
@@ -84,15 +84,15 @@ def unscale_row(row):
 
     ph = float(np.clip(physical["pH"], 2.0, 12.0))
     do = float(np.clip(physical["do_mgL"], 0.0, 15.0))
-    turb = float(np.clip(physical["turbidity_NTU"], 0.1, 30.0))
-    tds = float(np.clip(physical["tds_mgL"], 50.0, 1500.0))
-    bod = float(np.clip(tds * 0.01 + 2.5, 0.5, 20.0))
+    turb = float(np.clip(physical["turbidity_NTU"], 0.1, 150.0))
+    tds = float(np.clip(physical["tds_mgL"], 50.0, 3000.0))
+    bod = float(np.clip(physical["bod_mgL"], 0.5, 30.0))
 
     return {
         "ph": ph,
         "do": do,
         "bod": bod,
-        "bod_is_proxy": True,
+        "bod_is_proxy": False,
         "turbidity": turb,
         "tds": tds
     }
