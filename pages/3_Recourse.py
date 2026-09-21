@@ -37,7 +37,6 @@ selected_site = st.session_state["selected_site"]
 rec_res = calculate_recourse_actions(
     active_sample["ph"],
     active_sample["do"],
-    active_sample["bod"],
     active_sample["turbidity"],
     scaled_features_list=active_sample["raw_features"]
 )

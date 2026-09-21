@@ -151,7 +151,6 @@ for idx, r in df_sub.iterrows():
         "Sample Point": f"Row-{idx:04d}",
         "pH Level": p_unscaled["ph"],
         "Dissolved Oxygen (mg/L)": p_unscaled["do"],
-        "BOD (mg/L)": p_unscaled["bod"]
     })
 
 df_chart = pd.DataFrame(hist_rows)
@@ -159,7 +158,7 @@ df_chart = pd.DataFrame(hist_rows)
 fig_trend = px.line(
     df_chart,
     x="Sample Point",
-    y=["pH Level", "Dissolved Oxygen (mg/L)", "BOD (mg/L)"],
+    y=["pH Level", "Dissolved Oxygen (mg/L)"],
     markers=True,
     color_discrete_sequence=["#0ea5e9", "#22c55e", "#f59e0b"],
     template="plotly_white"

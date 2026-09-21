@@ -19,10 +19,10 @@ from datetime import datetime
 # ==========================================
 # 1. PyTorch Neural Network Architecture
 # ==========================================
-class DomainConstrainedMLP(nn.Module):
+class WaterQualityMLP(nn.Module):
     def __init__(self, input_dim=11, num_classes=4):
-        super(DomainConstrainedMLP, self).__init__()
-        self.network = nn.Sequential(
+        super(WaterQualityMLP, self).__init__()
+        self.net = nn.Sequential(
             nn.Linear(input_dim, 64),
             nn.BatchNorm1d(64),
             nn.ReLU(),
@@ -34,7 +34,7 @@ class DomainConstrainedMLP(nn.Module):
         )
 
     def forward(self, x):
-        return self.network(x)
+        return self.net(x)
 
 # ==========================================
 # 2. Artifact Loader (Model, Scaler, Dataset)
@@ -50,13 +50,14 @@ def load_pytorch_artifacts():
     scaler = joblib.load(scaler_path)
     encoder = joblib.load(encoder_path)
 
-    feat_cols = ['orp_mV', 'ec_uScm', 'tds_mgL', 'turbidity_NTU', 'temp_C', 'pH', 'do_mgL', 'bod_mgL', 'hour', 'day', 'month', 'dayofweek']
+    feat_cols = ['orp_mV', 'ec_uScm', 'tds_mgL', 'turbidity_NTU', 'temp_C', 'pH', 'do_mgL']
     input_dim = len(feat_cols)
     num_classes = len(encoder.classes_)
 
-    model = DomainConstrainedMLP(input_dim=input_dim, num_classes=num_classes)
-    if model_path.exists():
-        model.load_state_dict(torch.load(model_path))
+    model = WaterQualityMLP(input_dim=input_dim, num_classes=num_classes)
+    if not model_path.exists():
+        raise FileNotFoundError(f'Missing {model_path}! Please run train.py first.')
+    model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')))
     model.eval()
 
     return model, scaler, encoder, df, feat_cols
@@ -84,15 +85,12 @@ def unscale_row(row):
 
     ph = float(np.clip(physical["pH"], 2.0, 12.0))
     do = float(np.clip(physical["do_mgL"], 0.0, 15.0))
-    turb = float(np.clip(physical["turbidity_NTU"], 0.1, 150.0))
-    tds = float(np.clip(physical["tds_mgL"], 50.0, 3000.0))
-    bod = float(np.clip(physical["bod_mgL"], 0.5, 30.0))
+    turb = float(np.clip(physical["turbidity_NTU"], 0.1, 600.0))
+    tds = float(np.clip(physical["tds_mgL"], 0.0, 5000.0))
 
     return {
         "ph": ph,
         "do": do,
-        "bod": bod,
-        "bod_is_proxy": False,
         "turbidity": turb,
         "tds": tds
     }
@@ -138,10 +136,7 @@ def predict_with_pytorch(scaled_features_list):
     ph_val = float(physical["pH"])
     do_val = float(physical["do_mgL"])
     tds_val = float(physical["tds_mgL"])
-    bod_val = float(np.clip(tds_val * 0.01 + 2.5, 0.5, 20.0))
-
-    allowed_bod = 2.0 + (0.6 * do_val)
-    domain_violation = (ph_val < 4.0 or ph_val > 10.5 or bod_val > allowed_bod)
+    domain_violation = (ph_val < 4.0 or ph_val > 10.5 or do_val < 3.0)
 
     return {
         "prediction": prediction_label,
@@ -164,7 +159,7 @@ def get_site_dataframe(site_name):
     return df
 
 
-def _explain_sample_shap(scaled_features_list):
+def _explain_sample_heuristic(scaled_features_list):
     """
     Compute model-driven SHAP feature attributions for the predicted class.
     Input features are already scaled model inputs, matching inference.
@@ -230,10 +225,10 @@ def _explain_sample_shap(scaled_features_list):
         "regulation_reference": "WHO Guidelines for Drinking-water Quality / TNPCB Water Act 1974",
     }
 
-def explain_sample_shap(scaled_features_list):
+def explain_sample_heuristic(scaled_features_list):
     """Return real SHAP results without allowing attribution failures to stop the UI."""
     try:
-        return _explain_sample_shap(scaled_features_list)
+        return _explain_sample_heuristic(scaled_features_list)
     except Exception:
         return {
             "feature_contributions": {},
@@ -242,7 +237,7 @@ def explain_sample_shap(scaled_features_list):
             "regulation_reference": "WHO Guidelines for Drinking-water Quality / TNPCB Water Act 1974",
         }
 
-def calculate_recourse_actions(ph, do, bod, turb=3.2, tds=300.0, scaled_features_list=None):
+def calculate_recourse_actions(ph, do, turb=3.2, tds=300.0, scaled_features_list=None):
     before_after = []
     checklist = []
     severity_score = 0
@@ -260,21 +255,12 @@ def calculate_recourse_actions(ph, do, bod, turb=3.2, tds=300.0, scaled_features
         before_after.append({"parameter": "pH Level", "current": f"{ph:.1f}", "recommended": f"{target_ph:.1f}", "delta": f"-{delta:.2f}", "method": "Dispense mineral acid neutralizing buffer", "unit": "pH"})
         checklist.append({"task": "Dispense mineral acid buffer at Dosing Line 2", "assignee": "Operator_2", "status": "Pending"})
         
-    allowed_bod = 2.0 + (0.6 * do)
     if do < 4.5:
         target_do = 6.5
         delta_do = target_do - do
         severity_score += delta_do * 4
         before_after.append({"parameter": "Dissolved Oxygen (DO)", "current": f"{do:.1f} mg/L", "recommended": f"{target_do:.1f} mg/L", "delta": f"+{delta_do:.1f} mg/L", "method": "Increase mechanical aeration blower speed", "unit": "mg/L"})
         checklist.append({"task": f"Increase aeration rate at Tank A by +{min(50, int(delta_do * 12))}%", "assignee": "Operator_1", "status": "Pending"})
-        
-    if bod > allowed_bod:
-        target_bod = max(2.0, allowed_bod - 0.5)
-        delta_bod = bod - target_bod
-        severity_score += delta_bod * 2.5
-        before_after.append({"parameter": "Biological Oxygen Demand (BOD)", "current": f"{bod:.1f} mg/L", "recommended": f"{target_bod:.1f} mg/L", "delta": f"-{delta_bod:.1f} mg/L", "method": "(Coupled auto-reduction via Bacillus subtilis bio-dosing & aeration)", "unit": "mg/L"})
-        checklist.append({"task": "Inject Bacillus subtilis bio-augmentation strain (Unit 2)", "assignee": "Plant_Manager", "status": "Pending"})
-
     checklist.append({"task": "Re-test sample after 30 minutes to verify compliance restoration", "assignee": "Operator_1", "status": "Pending"})
 
     # Evaluate the proposed counterfactual with the same PyTorch model used
@@ -291,15 +277,13 @@ def calculate_recourse_actions(ph, do, bod, turb=3.2, tds=300.0, scaled_features
                 physical["pH"] = target
             elif action["parameter"] == "Dissolved Oxygen (DO)":
                 physical["do_mgL"] = target
-            elif action["parameter"] == "Biological Oxygen Demand (BOD)":
-                physical["tds_mgL"] = (target - 2.5) / 0.01
         proposed_features = scaler.transform(pd.DataFrame([physical], columns=feat_cols))[0].tolist()
         proposed_prediction = predict_with_pytorch(proposed_features)
         predicted_success_rate = int(round(proposed_prediction["safe_confidence"] * 100))
     else:
         predicted_success_rate = 0
 
-    urgency = "🔴 Immediate Action" if (ph < 4.0 or do < 2.0 or bod > 8.0) else ("🟡 Schedule Maintenance" if len(before_after) > 0 else "🟢 Monitor Only")
+    urgency = "🔴 Immediate Action" if (ph < 4.0 or do < 2.0 ) else ("🟡 Schedule Maintenance" if len(before_after) > 0 else "🟢 Monitor Only")
 
     return {
         "urgency": urgency, 
@@ -360,7 +344,6 @@ def set_active_sample_from_row(row, row_idx=0, site_name="Tank A (Main Reservoir
         "raw_features": raw_feats,
         "ph": phys["ph"],
         "do": phys["do"],
-        "bod": phys["bod"],
         "turbidity": phys["turbidity"],
         "timestamp": timestamp_str
     }
@@ -383,7 +366,6 @@ def set_active_sample_from_row(row, row_idx=0, site_name="Tank A (Main Reservoir
             "_raw_features": raw_feats,
             "pH": f"{phys['ph']:.1f}",
             "DO (mg/L)": f"{phys['do']:.1f}",
-            "BOD (mg/L)": f"{phys['bod']:.1f}",
             "Prediction": pred_res["prediction"],
             "Risk Tier": pred_res["status_tier"],
             "Confidence": f"{pred_res['confidence']*100:.1f}%",
@@ -422,10 +404,9 @@ def render_global_sidebar():
     st.sidebar.markdown("---")
     st.sidebar.markdown("### ⚡ System Telemetry")
     st.sidebar.markdown("""
-    - **PINN Engine:** `Online (v2.4)`
-    - **Telecontrol Link:** `Connected (0.4ms)`
+    - **Model:** `WaterQualityMLP`
     - **Standards:** `WHO / TNPCB 1974`
-    - **Dataset:** `1,722 Real Rows`
+    - **Dataset:** `2,153 Real Rows`
     """)
     st.sidebar.markdown("---")
 

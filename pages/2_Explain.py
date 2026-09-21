@@ -23,7 +23,7 @@ from model_backend import (
     init_global_state,
     render_persistent_header,
     render_global_sidebar,
-    explain_sample_shap,
+    explain_sample_heuristic,
     predict_with_pytorch
 )
 
@@ -57,7 +57,6 @@ matched_log = next((l for l in logs if l["Sample ID"] == selected_id), None)
 if matched_log:
     s_ph = float(matched_log["pH"])
     s_do = float(matched_log["DO (mg/L)"].replace(" mg/L", ""))
-    s_bod = float(matched_log["BOD (mg/L)"].replace(" mg/L", ""))
     s_site = matched_log["Site Name"]
     s_raw_feats = matched_log.get("_raw_features")
     if s_raw_feats is None:
@@ -65,14 +64,14 @@ if matched_log:
         s_raw_feats = st.session_state["active_sample"]["raw_features"]
 else:
     active_s = st.session_state["active_sample"]
-    s_ph, s_do, s_bod, s_site = active_s["ph"], active_s["do"], active_s["bod"], active_s["site_name"]
+    s_ph, s_do, s_site = active_s["ph"], active_s["do"], active_s["site_name"]
     s_raw_feats = active_s.get("raw_features", [0.0]*11)
 
 # Ensure raw features is a list of clean floats to prevent format type errors
 s_raw_feats = [float(val) for val in s_raw_feats]
 
 pred_res = predict_with_pytorch(s_raw_feats)
-explain_res = explain_sample_shap(s_raw_feats)
+explain_res = explain_sample_heuristic(s_raw_feats)
 
 st.markdown("---")
 
@@ -83,7 +82,7 @@ st.caption(f"Physical environmental summary for **{selected_id}** at **{s_site}*
 if pred_res["status_tier"] in ["High Risk", "Critical Threat"]:
     st.error(f"🔴 **{pred_res['status_tier']}** — Severe hypoxia & acidification detected. Dissolved oxygen ({s_do:.1f} mg/L) and pH levels ({s_ph:.1f}) are critically insufficient to support aquatic life or safe municipal treatment.")
 elif pred_res["status_tier"] == "Medium Risk":
-    st.warning(f"🟡 **Medium Risk / Operational Warning** — Moderate parameter deviation. Organic load ({s_bod:.1f} mg/L) requires active monitoring and automated bio-dosing intervention.")
+    st.warning(f"🟡 **Medium Risk / Operational Warning** — Moderate parameter deviation. Organic load requires active monitoring and automated bio-dosing intervention.")
 else:
     st.success(f"🟢 **Safe / Low Risk Ecosystem** — Optimal hydro-chemical balance. All sensor readings fall within TNPCB regulatory safe envelopes.")
 

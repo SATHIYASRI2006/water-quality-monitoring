@@ -128,17 +128,26 @@ with m1:
         st.markdown("<span class='badge-high'>🔴 HIGH RISK</span>", unsafe_allow_html=True)
     st.caption(f"AI Confidence: {pred['confidence']*100:.1f}%")
 
+import json
 with m2:
-    st.metric("Model F1-Score (Test)", "89.35%", "Cross-validated")
+    try:
+        with open("metrics.json", "r") as mf:
+            m_data = json.load(mf)
+            f1 = m_data.get("f1_macro", 0.0)
+            dvr_m = m_data.get("domain_violation_rate_pct", 0.0)
+            st.metric("Model F1-Score", f"{f1*100:.1f}%", "Macro Avg (Test Set)")
+    except:
+        st.metric("Model F1-Score", "N/A")
+
 
 with m3:
-    logs = st.session_state.get("audit_logs", [])
-    if len(logs) > 0:
-        dvr_count = sum(1 for l in logs if "⚠️" in l.get("Violation Flag", ""))
-        dvr = (dvr_count / len(logs)) * 100
-    else:
-        dvr = 0.0
-    st.metric("Domain Violation Rate (DVR)", f"{dvr:.1f}%", "From active session logs")
+    try:
+        with open("metrics.json", "r") as mf:
+            m_data = json.load(mf)
+            dvr_m = m_data.get("domain_violation_rate_pct", 0.0)
+            st.metric("Domain Violation Rate (DVR)", f"{dvr_m:.1f}%", "Test Set (Critical/Severe)")
+    except:
+        st.metric("Domain Violation Rate (DVR)", "N/A")
 
 with m4:
     st.metric("Site Records Monitored", f"{len(df_filtered)} Samples", f"Total Tank Data Points")
@@ -149,7 +158,7 @@ st.markdown("---")
 st.subheader("📊 Live Telemetry Gauges (Active Site)")
 st.caption(f"Real-time sensor indicators for **{st.session_state['selected_site']}** comparing live values against safe regulatory bands.")
 
-g1, g2, g3 = st.columns(3)
+g1, g2 = st.columns(2)
 
 with g1:
     fig_ph = go.Figure(go.Indicator(
@@ -189,24 +198,6 @@ with g2:
     fig_do.update_layout(height=230, margin=dict(l=20, r=20, t=35, b=10))
     st.plotly_chart(fig_do, width='stretch')
 
-with g3:
-    fig_bod = go.Figure(go.Indicator(
-        mode="gauge+number",
-        value=sample["bod"],
-        number={'suffix': " mg/L"},
-        title={'text': "BOD Level (Safe: < 5.0 mg/L)", 'font': {'size': 15, 'color': '#1e293b'}},
-        gauge={
-            'axis': {'range': [0, 15]},
-            'bar': {'color': "#f59e0b"},
-            'steps': [
-                {'range': [0, 5.0], 'color': "#dcfce7"},
-                {'range': [5.0, 15.0], 'color': "#fee2e2"}
-            ],
-            'threshold': {'line': {'color': "orange", 'width': 4}, 'value': sample["bod"]}
-        }
-    ))
-    fig_bod.update_layout(height=230, margin=dict(l=20, r=20, t=35, b=10))
-    st.plotly_chart(fig_bod, width='stretch')
 
 st.markdown("---")
 
@@ -232,7 +223,7 @@ for idx, row in df_sub.iterrows():
         "Sample Point": f"Pt-{idx:04d}",
         "pH Level": phys["ph"],
         "Dissolved Oxygen (mg/L)": phys["do"],
-        "BOD (mg/L)": phys["bod"]
+        
     })
 
 df_chart = pd.DataFrame(hist_rows)
@@ -240,7 +231,7 @@ df_chart = pd.DataFrame(hist_rows)
 fig_trend = px.line(
     df_chart,
     x="Sample Point",
-    y=["pH Level", "Dissolved Oxygen (mg/L)", "BOD (mg/L)"],
+    y=["pH Level", "Dissolved Oxygen (mg/L)"],
     markers=True,
     color_discrete_sequence=["#0ea5e9", "#22c55e", "#f59e0b"],
     template="plotly_white"
@@ -259,7 +250,6 @@ st.caption("Detailed breakdown of current parameter readings against WHO & TNPCB
 diag_rows = [
     {"Parameter": "pH Level", "Current Reading": f"{sample['ph']:.2f}", "Regulatory Envelope": "6.5 - 8.5", "Status Check": "🟢 COMPLIANT" if 6.5 <= sample['ph'] <= 8.5 else "🔴 VIOLATION"},
     {"Parameter": "Dissolved Oxygen (DO)", "Current Reading": f"{sample['do']:.2f} mg/L", "Regulatory Envelope": "≥ 4.0 mg/L", "Status Check": "🟢 COMPLIANT" if sample['do'] >= 4.0 else "🔴 VIOLATION"},
-    {"Parameter": "BOD (Organic Load)", "Current Reading": f"{sample['bod']:.2f} mg/L", "Regulatory Envelope": "≤ 5.0 mg/L", "Status Check": "🟢 COMPLIANT" if sample['bod'] <= 5.0 else "🔴 VIOLATION"},
     {"Parameter": "Turbidity", "Current Reading": f"{sample['turbidity']:.2f} NTU", "Regulatory Envelope": "≤ 5.0 NTU", "Status Check": "🟢 COMPLIANT" if sample['turbidity'] <= 5.0 else "🔴 WARNING"},
 ]
 st.dataframe(pd.DataFrame(diag_rows), width='stretch', hide_index=True)
@@ -275,7 +265,7 @@ for s_name in available_sites:
     sub_site = get_site_dataframe(s_name)
     if len(sub_site) > 0:
         p_row = unscale_row(sub_site.iloc[0])
-        eval_p = predict_with_pytorch([float(sub_site.iloc[0][col]) for col in ['orp_mV', 'ec_uScm', 'tds_mgL', 'turbidity_NTU', 'temp_C', 'pH', 'do_mgL', 'bod_mgL', 'hour', 'day', 'month', 'dayofweek']])
+        eval_p = predict_with_pytorch([float(sub_site.iloc[0][col]) for col in ['orp_mV', 'ec_uScm', 'tds_mgL', 'turbidity_NTU', 'temp_C', 'pH', 'do_mgL']])
         
         if eval_p["status_tier"] == "Safe / Low Risk":
             b_html = "🟢 SAFE"
@@ -290,8 +280,7 @@ for s_name in available_sites:
             "Status": b_html,
             "pH Level": f"{p_row['ph']:.1f}",
             "Dissolved Oxygen": f"{p_row['do']:.1f} mg/L",
-            "BOD Level": f"{p_row['bod']:.1f} mg/L",
-            "Turbidity": f"{p_row['turbidity']:.1f} NTU",
+                        "Turbidity": f"{p_row['turbidity']:.1f} NTU",
             "Last Updated": "Live Stream"
         })
 
