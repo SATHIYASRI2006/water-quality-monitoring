@@ -1,0 +1,11 @@
+{
+    "f1_score_macro": 0.917883018668359,
+    "f1_score_per_class": {
+        "Caution": 0.7272727272727273,
+        "Critical": 1.0,
+        "Normal": 0.9947643979057592,
+        "Warning": 0.9494949494949495
+    },
+    "dvr_test_set": 0.7027863777089783,
+    "total_dataset_rows": 2153
+}
